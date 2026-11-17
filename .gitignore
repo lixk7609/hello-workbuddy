@@ -1,0 +1,9 @@
+bin/
+*.prg
+*.iq
+*.mir
+*.debug.xml
+keys/
+*.der
+*.pem
+__pycache__/
