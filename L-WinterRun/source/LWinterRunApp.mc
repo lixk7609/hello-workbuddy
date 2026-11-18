@@ -56,8 +56,8 @@ const KM_INT_MAX = 42;
 
 //! 跑步姿态判定：加速度幅值标准差 / 均值 比值阈值
 //! 跑步时手臂摆动剧烈（比值约 0.25~0.45），走路约 0.08~0.15，静止接近 0
-const DETECT_RATIO = 0.15;
-const DETECT_SEC   = 60;   // 需连续识别的秒数
+const DETECT_RATIO = 0.15;  // 跑步约 0.25~0.45，走路约 0.08~0.15
+const DETECT_SEC   = 60;    // 需连续 60 秒达标，中断即重新计数
 
 //! 主视图
 class LWRView extends WatchUi.View {
@@ -200,6 +200,7 @@ class LWRView extends WatchUi.View {
                   :heartBeatIntervals => { :enabled => true } });
         } catch (e) {
             System.println("registerSensorDataListener: " + e.getErrorMessage());
+            mErrStr = "REG: " + e.getErrorMessage();
         }
         // 提前开启 GPS 连续定位：搜星与姿态识别并行，双条件满足即开跑
         try {
@@ -278,6 +279,7 @@ class LWRView extends WatchUi.View {
     //! 跑步态用相邻 GPS 点 haversine 累加距离（不依赖 speed 字段）
     public function onPosition(info as Position.Info) as Void {
         if (info == null) { return; }          // 空回调防御
+        try {
         var pos = info.position;
         if (pos == null) {
             if (mState == ST_ARMED) { mGpsFix = false; }   // 信号丢失，重新等待
@@ -293,6 +295,7 @@ class LWRView extends WatchUi.View {
         }
         if (mState != ST_RUN) { return; }
         accumulateDistance(pos);
+        } catch (e) { mErrStr = "GPS: " + e.getErrorMessage(); }
     }
 
     //! 跑步态：用相邻 GPS 点 haversine 累加距离（不依赖 speed 字段）
@@ -325,6 +328,7 @@ class LWRView extends WatchUi.View {
 
     //! 传感器回调（每秒一批）：加速度样本 → 姿态识别；RR间期 → 换算心率
     public function onAccel(sensorData as Sensor.SensorData) as Void {
+        try {
         // 双通道心率之一：由心跳间期（RR interval，毫秒）换算实时心率
         var hd = sensorData.heartRateData;
         if (hd != null) {
@@ -357,6 +361,7 @@ class LWRView extends WatchUi.View {
         if (mAccelBuf.size() > 400) {
             mAccelBuf = mAccelBuf.slice(mAccelBuf.size() - 200, mAccelBuf.size());
         }
+        } catch (e) { mErrStr = "SEN: " + e.getErrorMessage(); }
     }
 
     //! 心率样本落账（两条通道共用）
@@ -462,6 +467,7 @@ class LWRView extends WatchUi.View {
 
     //! 每秒一次：更新时间 / 姿态识别 / 运行数据
     public function onTick() as Void {
+        try {
         var t = System.getClockTime();
         mTimeStr = Lang.format("$1$:$2$", [ t.hour.format("%02d"), t.min.format("%02d") ]);
 
@@ -516,6 +522,7 @@ class LWRView extends WatchUi.View {
         }
 
         WatchUi.requestUpdate();
+        } catch (e) { mErrStr = "TICK: " + e.getErrorMessage(); WatchUi.requestUpdate(); }
     }
 
     private function formatDuration(sec as Number) as String {
@@ -597,7 +604,7 @@ class LWRView extends WatchUi.View {
             dc.drawText(cxM, (h * 0.78).toNumber(), Graphics.FONT_TINY,
                 "START 确认", Graphics.TEXT_JUSTIFY_CENTER);
             dc.drawText(cxM, (h * 0.87).toNumber(), Graphics.FONT_TINY,
-                "BACK 退出", Graphics.TEXT_JUSTIFY_CENTER);
+                mErrStr != "" ? mErrStr : "BACK 退出", Graphics.TEXT_JUSTIFY_CENTER);
             return;
         }
 
@@ -667,6 +674,11 @@ class LWRView extends WatchUi.View {
         var v3y = (y3 + tinyH + gap).toNumber();
         drawBoldSmall(dc, cxL, v3y, mPaceStr);
         drawBoldSmall(dc, cxR, v3y, mRemainStr);
+
+        if (mErrStr != "") {
+            dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
+            dc.drawText(cxM, (h * 0.94).toNumber(), Graphics.FONT_TINY, mErrStr, Graphics.TEXT_JUSTIFY_CENTER);
+        }
     }
 
     //! 数值文字加重加粗：横向 3 遍 + 纵向 2 遍叠印
@@ -777,6 +789,7 @@ class LWRDelegate extends WatchUi.InputDelegate {
     }
 
     public function onKey(evt as KeyEvent) as Boolean {
+        try {
         var key = evt.getKey();
         var st = _view.mState;
 
@@ -802,6 +815,7 @@ class LWRDelegate extends WatchUi.InputDelegate {
             if (WatchUi.KEY_MENU == key)  { _view.exitApp(); return true; }   // 长按 UP 退出
             if (WatchUi.KEY_ENTER == key || WatchUi.KEY_ESC == key) { _view.backToMenu(); return true; }
         }
+        } catch (e) { _view.mErrStr = "KEY: " + e.getErrorMessage(); WatchUi.requestUpdate(); }
         return false;
     }
 }
