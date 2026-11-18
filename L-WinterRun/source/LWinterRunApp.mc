@@ -12,9 +12,10 @@ import Toybox.System;
 import Toybox.Timer;
 import Toybox.WatchUi;
 
-//! L冬跑 —— 预设距离自动起停跑步 App v2.0.0
+//! L冬跑 —— 预设距离自动起停跑步 App v2.0.1
 //! 为冬季厚手套场景设计：全程无需摘手套按键。
-//! 流程：左中键/左下键调整数公里(1~42)，LAP键调小数部分(+0.01) → 右上键(START)确认
+//! 流程：左中键/左下键调整数公里(1~42)，右下键(BACK)调小数部分(+0.01)
+//!       → 右上键(START)确认
 //!       → 立即开始搜星 + 识别跑步姿态，"连续 60 秒跑步特征" 且 "GPS 已连接" 两者同时
 //!       满足后自动开始计时计距 → 跑够预设距离自动停止并保存。
 //! 计距：GPS 相邻点 haversine 累加（不依赖 speed 字段）。
@@ -600,11 +601,11 @@ class LWRView extends WatchUi.View {
             dc.drawText(cxM, (h * 0.62).toNumber(), Graphics.FONT_TINY,
                 "UP/DOWN 整数公里", Graphics.TEXT_JUSTIFY_CENTER);
             dc.drawText(cxM, (h * 0.70).toNumber(), Graphics.FONT_TINY,
-                "LAP 调小数 0.01", Graphics.TEXT_JUSTIFY_CENTER);
+                "BACK 调小数 0.01", Graphics.TEXT_JUSTIFY_CENTER);
             dc.drawText(cxM, (h * 0.78).toNumber(), Graphics.FONT_TINY,
                 "START 确认", Graphics.TEXT_JUSTIFY_CENTER);
             dc.drawText(cxM, (h * 0.87).toNumber(), Graphics.FONT_TINY,
-                mErrStr != "" ? mErrStr : "BACK 退出", Graphics.TEXT_JUSTIFY_CENTER);
+                mErrStr != "" ? mErrStr : "长按 UP 退出", Graphics.TEXT_JUSTIFY_CENTER);
             return;
         }
 
@@ -772,8 +773,8 @@ class LWRView extends WatchUi.View {
 }
 
 //! 按键处理
-//! MENU:   UP/DOWN 调整数公里(±1)，LAP 键调小数(+0.01)，右上键确认，
-//!         短按 BACK 或长按 UP(MENU键) 退出应用
+//! MENU:   UP/DOWN 调整数公里(±1)，右下键(BACK/LAP)调小数(+0.01)，右上键确认，
+//!         长按 UP(MENU键) 退出应用
 //! ARMED:  左键仍可改距离、LAP 键改小数，右上键可跳过双条件立即开始（兜底），
 //!         短按 BACK 返回菜单，长按 UP 退出应用
 //! RUN:    右上键手动结束（停止并保存），短按 BACK 放弃（停止并丢弃），
@@ -797,8 +798,10 @@ class LWRDelegate extends WatchUi.InputDelegate {
             if (WatchUi.KEY_MENU == key)  { _view.exitApp(); return true; }   // 长按 UP 退出
             if (WatchUi.KEY_UP == key)    { _view.intUp(); return true; }
             if (WatchUi.KEY_DOWN == key)  { _view.intDown(); return true; }
+            // fenix7x 是 5 键机型，右下键在程序里发的是 BACK(KEY_ESC) 而非 LAP，
+            // 因此小数步进改用右下键(BACK)；6 键机型的独立 LAP 键也一并支持
+            if (WatchUi.KEY_ESC == key)   { _view.decNext(); return true; }
             if (WatchUi.KEY_LAP == key)   { _view.decNext(); return true; }
-            if (WatchUi.KEY_ESC == key)   { _view.exitApp(); return true; }   // 短按 BACK 退出
             if (WatchUi.KEY_ENTER == key) { _view.armRun(); return true; }
         } else if (st == ST_ARMED) {
             if (WatchUi.KEY_MENU == key)  { _view.exitApp(); return true; }   // 长按 UP 退出
