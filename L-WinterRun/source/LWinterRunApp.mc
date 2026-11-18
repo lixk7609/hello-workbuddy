@@ -90,6 +90,8 @@ class LWRView extends WatchUi.View {
     private var mLastLat    as Double or Null = null;   // 上一个 GPS 点
     private var mLastLon    as Double or Null = null;
     private var mLastKmMark as Number = 0;              // 已提示到的整公里数
+    private var mLastHrCbMs as Number = 0;              // 最近一次传感器回调心率时刻（去重用）
+    public  var mErrStr     as String = "";             // 等待态错误提示
 
     // 心率累计（用于平均心率）
     private var mHrSum    as Float  = 0.0;
@@ -135,11 +137,16 @@ class LWRView extends WatchUi.View {
         mLastLon = null;
         mLastKmMark = 0;
         mState = ST_MENU;
+        mErrStr = "";
         WatchUi.requestUpdate();
     }
 
     //! 放弃当前跑步（停止并丢弃记录）
     public function cancelRun() as Void {
+        // 注销传感器监听，避免回到菜单后仍持续回调
+        try { Sensor.unregisterSensorDataListener(); } catch (e) { }
+        mAccelBuf = [];
+        mDetectSec = 0;
         try { Position.enableLocationEvents(Position.LOCATION_DISABLE, method(:onPosition)); } catch (e) { }
         if (mSession != null) {
             try { mSession.stop(); } catch (e) { }
@@ -185,8 +192,11 @@ class LWRView extends WatchUi.View {
         mGpsFix = false;
         mAccelBuf = [];
         try {
+            // 心跳间期必须显式启用，否则回调里 heartRateData 始终为 null
             Sensor.registerSensorDataListener(method(:onAccel),
-                { :period => 1, :accelerometer => { :enabled => true, :sampleRate => 25 } });
+                { :period => 1,
+                  :accelerometer => { :enabled => true, :sampleRate => 25 },
+                  :heartBeatIntervals => { :enabled => true } });
         } catch (e) {
             System.println("registerSensorDataListener: " + e.getErrorMessage());
         }
@@ -207,19 +217,29 @@ class LWRView extends WatchUi.View {
         mDetectSec = 0;
         mDistStr = "0.00"; mTimerStr = "0:00"; mHrStr = "--";
         mPaceStr = "--'--\""; mRemainStr = "--"; mAvgHr = 0;
-        mHrSum = 0.0; mHrCount = 0;
+        mHrSum = 0.0; mHrCount = 0; mLastHrCbMs = 0;
         mRunDist = 0.0; mCurSpeed = 0.0;
         mLastLat = null; mLastLon = null; mLastKmMark = 0;
         mRunStartMs = System.getTimer();
         mLastPosMs = mRunStartMs;
+        var started = false;
         try {
             mSession = ActivityRecording.createSession(
                 { :name => "L冬跑", :sport => Activity.SPORT_RUNNING });
             if (mSession != null) {
-                mSession.start();
+                started = mSession.start();
             }
         } catch (e) {
             System.println("createSession: " + e.getErrorMessage());
+        }
+        if (!started) {
+            // 会话创建/启动失败：不进入跑步态，留在等待态并提示
+            // （没有有效会话就无法保存记录，继续跑没有意义）
+            mSession = null;
+            mErrStr = "会话启动失败，无法保存";
+            mState = ST_ARMED;
+            WatchUi.requestUpdate();
+            return;
         }
         // 开启 GPS 连续定位（计距用）
         try {
@@ -256,6 +276,7 @@ class LWRView extends WatchUi.View {
     //! GPS 定位回调：等待态更新定位标志（连上时短震提醒）；
     //! 跑步态用相邻 GPS 点 haversine 累加距离（不依赖 speed 字段）
     public function onPosition(info as Position.Info) as Void {
+        if (info == null) { return; }          // 空回调防御
         var pos = info.position;
         if (pos == null) {
             if (mState == ST_ARMED) { mGpsFix = false; }   // 信号丢失，重新等待
@@ -264,6 +285,7 @@ class LWRView extends WatchUi.View {
         if (mState == ST_ARMED) {
             if (!mGpsFix) {
                 buzzGps();   // GPS 连接短震1
+                mErrStr = "";
             }
             mGpsFix = true;
             return;
@@ -279,11 +301,17 @@ class LWRView extends WatchUi.View {
         var lat = deg[0] as Double;
         var lon = deg[1] as Double;
         var now = System.getTimer();
+        var dt = (now - mLastPosMs) / 1000.0;
         if (mLastLat != null && mLastLon != null) {
             var d = haversineM(mLastLat, mLastLon, lat, lon);
-            if (d >= 0.0 && d < 200.0) {   // 单点跳变保护（>200m 视为漂移，丢弃）
+            // 单点跳变保护：>200m 视为漂移丢弃；
+            // 但若间隔较长（GPS 短暂失联后恢复），按实际速度放宽上限，避免漏计真实距离
+            var accept = d >= 0.0 && d < 200.0;
+            if (!accept && dt > 5.0 && dt < 120.0 && d / dt < 8.0) {
+                accept = true;   // 失联恢复：折算速度 < 8m/s 即采信
+            }
+            if (accept) {
                 mRunDist += d;
-                var dt = (now - mLastPosMs) / 1000.0;
                 if (dt > 0.5 && dt < 60.0 && d > 0.5) {
                     mCurSpeed = (d / dt) as Float;   // 用于配速
                 }
@@ -337,6 +365,7 @@ class LWRView extends WatchUi.View {
         mHrSum += hrN * 1.0;
         mHrCount += 1;
         mAvgHr = (mHrSum / mHrCount).toNumber();
+        mLastHrCbMs = System.getTimer();
     }
 
     //! 加速度幅值的标准差 / 均值（单位无关，跑步显著大于走路与静止）
@@ -451,7 +480,11 @@ class LWRView extends WatchUi.View {
                 startRun();
             }
         } else if (mState == ST_RUN) {
-            pollHeartRate();   // 备用通道（传感器回调为主）
+            // 备用通道：仅当传感器回调超过 3 秒没送来心率时才轮询历史，
+            // 避免同一份历史样本被两条通道重复计入平均值
+            if (System.getTimer() - mLastHrCbMs > 3000) {
+                pollHeartRate();
+            }
 
             // 计时器
             var el = ((System.getTimer() - mRunStartMs) / 1000).toNumber();
@@ -581,7 +614,7 @@ class LWRView extends WatchUi.View {
             dc.drawText(cxM, (h * 0.70).toNumber(), Graphics.FONT_TINY,
                 mGpsFix ? "GPS 已连接" : "GPS 搜星中…", Graphics.TEXT_JUSTIFY_CENTER);
             dc.drawText(cxM, (h * 0.80).toNumber(), Graphics.FONT_TINY,
-                "双条件就绪自动开跑", Graphics.TEXT_JUSTIFY_CENTER);
+                mErrStr != "" ? mErrStr : "双条件就绪自动开跑", Graphics.TEXT_JUSTIFY_CENTER);
             dc.drawText(cxM, (h * 0.88).toNumber(), Graphics.FONT_TINY,
                 "BACK 返回 · 长按UP 退出", Graphics.TEXT_JUSTIFY_CENTER);
             return;
