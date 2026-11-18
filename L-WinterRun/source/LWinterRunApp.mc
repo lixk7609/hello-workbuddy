@@ -1,3 +1,4 @@
+import Toybox.Attention;
 import Toybox.Application;
 import Toybox.Activity;
 import Toybox.ActivityRecording;
@@ -11,11 +12,14 @@ import Toybox.System;
 import Toybox.Timer;
 import Toybox.WatchUi;
 
-//! L冬跑 —— 预设距离自动起停跑步 App v1.1.1
+//! L冬跑 —— 预设距离自动起停跑步 App v2.0.0
 //! 为冬季厚手套场景设计：全程无需摘手套按键。
-//! 流程：左中键/左下键调整数公里(1~42)，右下键调小数部分(+0.01) → 右上键(START)确认
+//! 流程：左中键/左下键调整数公里(1~42)，LAP键调小数部分(+0.01) → 右上键(START)确认
 //!       → 立即开始搜星 + 识别跑步姿态，"连续 60 秒跑步特征" 且 "GPS 已连接" 两者同时
 //!       满足后自动开始计时计距 → 跑够预设距离自动停止并保存。
+//! 计距：GPS 相邻点 haversine 累加（不依赖 speed 字段）。
+//! 振动：GPS 连接短震1 / 自动开表长震1 / 每整公里短震1 / 达标长震3（Attention.vibrate）。
+//! 退出：长按UP(MENU键)任意状态退出（跑步中先保存）；选距离界面短按 BACK 退出。
 //! 面板样式沿用 L跑步 v1.3.0：白底黑字加粗 + 顶部弧形刻度柱。
 class LWinterRunApp extends Application.AppBase {
 
@@ -78,11 +82,14 @@ class LWRView extends WatchUi.View {
     private var mDoneTimeStr  as String = "";
     private var mDonePaceStr  as String = "";
 
-    // 运行期数据（GPS 速度积分）
+    // 运行期数据（GPS haversine 逐点累加）
     private var mRunDist    as Float  = 0.0;
     private var mRunStartMs as Number = 0;
     private var mLastPosMs  as Number = 0;
     private var mCurSpeed   as Float  = 0.0;
+    private var mLastLat    as Double or Null = null;   // 上一个 GPS 点
+    private var mLastLon    as Double or Null = null;
+    private var mLastKmMark as Number = 0;              // 已提示到的整公里数
 
     // 心率累计（用于平均心率）
     private var mHrSum    as Float  = 0.0;
@@ -123,6 +130,10 @@ class LWRView extends WatchUi.View {
         mAvgHr = 0;
         mHrSum = 0.0;
         mHrCount = 0;
+        mRunDist = 0.0;
+        mLastLat = null;
+        mLastLon = null;
+        mLastKmMark = 0;
         mState = ST_MENU;
         WatchUi.requestUpdate();
     }
@@ -191,13 +202,14 @@ class LWRView extends WatchUi.View {
 
     //! 姿态识别达标（或手动兜底）→ 创建跑步会话并开始
     public function startRun() as Void {
-        try { Sensor.unregisterSensorDataListener(); } catch (e) { }
+        // 保留传感器监听：RUN 态继续用它取实时心率（accelRatio 不再使用）
         mAccelBuf = [];
         mDetectSec = 0;
         mDistStr = "0.00"; mTimerStr = "0:00"; mHrStr = "--";
         mPaceStr = "--'--\""; mRemainStr = "--"; mAvgHr = 0;
         mHrSum = 0.0; mHrCount = 0;
         mRunDist = 0.0; mCurSpeed = 0.0;
+        mLastLat = null; mLastLon = null; mLastKmMark = 0;
         mRunStartMs = System.getTimer();
         mLastPosMs = mRunStartMs;
         try {
@@ -216,7 +228,14 @@ class LWRView extends WatchUi.View {
             System.println("enableLocationEvents: " + e.getErrorMessage());
         }
         mState = ST_RUN;
+        buzzStart();   // 开表长震1
         WatchUi.requestUpdate();
+    }
+
+    //! 跑步中退出应用：先保存已跑部分再退出
+    public function exitRunSave() as Void {
+        finishRun();
+        exitApp();
     }
 
     //! 达到预设距离（或手动）→ 停止并自动保存
@@ -234,42 +253,90 @@ class LWRView extends WatchUi.View {
         WatchUi.requestUpdate();
     }
 
-    //! GPS 定位回调：等待态更新定位标志；跑步态做速度积分累计距离
+    //! GPS 定位回调：等待态更新定位标志（连上时短震提醒）；
+    //! 跑步态用相邻 GPS 点 haversine 累加距离（不依赖 speed 字段）
     public function onPosition(info as Position.Info) as Void {
-        var hasFix = (info != null && info.position != null);
-        if (mState == ST_ARMED) {
-            mGpsFix = hasFix;   // 双条件之一：GPS 已连接
+        var pos = info.position;
+        if (pos == null) {
+            if (mState == ST_ARMED) { mGpsFix = false; }   // 信号丢失，重新等待
             return;
         }
-        if (mState != ST_RUN || !hasFix) { return; }
-        var now = System.getTimer();
-        var dt = (now - mLastPosMs) / 1000.0;
-        mLastPosMs = now;
-        if (dt <= 0.0 || dt > 10.0) { return; }   // 异常间隔跳过
-        var spd = null;
-        if (info has :speed) { spd = info.speed; }
-        if (spd != null && spd > 0.1) {
-            mRunDist += spd * dt;
-            mCurSpeed = spd;
+        if (mState == ST_ARMED) {
+            if (!mGpsFix) {
+                buzzGps();   // GPS 连接短震1
+            }
+            mGpsFix = true;
+            return;
         }
+        if (mState != ST_RUN) { return; }
+        accumulateDistance(pos);
     }
 
-    //! 加速度回调（每秒一批，约 25 个样本）
+    //! 跑步态：用相邻 GPS 点 haversine 累加距离（不依赖 speed 字段）
+    private function accumulateDistance(pos as Position.Location) as Void {
+        var deg = pos.toDegrees();
+        if (deg == null || deg.size() < 2) { return; }
+        var lat = deg[0] as Double;
+        var lon = deg[1] as Double;
+        var now = System.getTimer();
+        if (mLastLat != null && mLastLon != null) {
+            var d = haversineM(mLastLat, mLastLon, lat, lon);
+            if (d >= 0.0 && d < 200.0) {   // 单点跳变保护（>200m 视为漂移，丢弃）
+                mRunDist += d;
+                var dt = (now - mLastPosMs) / 1000.0;
+                if (dt > 0.5 && dt < 60.0 && d > 0.5) {
+                    mCurSpeed = (d / dt) as Float;   // 用于配速
+                }
+            }
+        }
+        mLastPosMs = now;
+        mLastLat = lat;
+        mLastLon = lon;
+    }
+
+    //! 传感器回调（每秒一批）：加速度样本 → 姿态识别；RR间期 → 换算心率
     public function onAccel(sensorData as Sensor.SensorData) as Void {
+        // 双通道心率之一：由心跳间期（RR interval，毫秒）换算实时心率
+        var hd = sensorData.heartRateData;
+        if (hd != null) {
+            var iv = hd.heartBeatIntervals;
+            if (iv != null && iv.size() > 0) {
+                var sum = 0.0;
+                for (var j = 0; j < iv.size(); j++) {
+                    sum += iv[j].toFloat();
+                }
+                var avgMs = sum / iv.size();
+                if (avgMs > 0.0) {
+                    var bpm = (60000.0 / avgMs).toNumber();
+                    if (bpm >= 30 && bpm <= 250) {
+                        applyHeartRate(bpm);
+                    }
+                }
+            }
+        }
         var acc = sensorData.accelerometerData;
         if (acc == null) { return; }
         var xs = acc.x; var ys = acc.y; var zs = acc.z;
         if (xs == null || ys == null || zs == null) { return; }
         var n = xs.size();
         for (var i = 0; i < n; i++) {
-            var x = xs[i] * 1.0;
-            var y = ys[i] * 1.0;
-            var z = zs[i] * 1.0;
-            mAccelBuf.add(Math.sqrt(x * x + y * y + z * z));
+            var x = xs[i].toFloat();
+            var y = ys[i].toFloat();
+            var z = zs[i].toFloat();
+            mAccelBuf.add(Math.sqrt(x * x + y * y + z * z) as Float);
         }
         if (mAccelBuf.size() > 400) {
             mAccelBuf = mAccelBuf.slice(mAccelBuf.size() - 200, mAccelBuf.size());
         }
+    }
+
+    //! 心率样本落账（两条通道共用）
+    private function applyHeartRate(hr as Numeric) as Void {
+        var hrN = hr.toNumber();
+        mHrStr = hrN.toString();
+        mHrSum += hrN * 1.0;
+        mHrCount += 1;
+        mAvgHr = (mHrSum / mHrCount).toNumber();
     }
 
     //! 加速度幅值的标准差 / 均值（单位无关，跑步显著大于走路与静止）
@@ -290,7 +357,7 @@ class LWRView extends WatchUi.View {
         return (Math.sqrt(varr) / mean).toFloat();
     }
 
-    //! 从 SensorHistory 取当前心率
+    //! 从 SensorHistory 取当前心率（备用通道）
     private function pollHeartRate() as Void {
         if ((Toybox has :SensorHistory) && (SensorHistory has :getHeartRateHistory)) {
             var itr = null;
@@ -299,19 +366,68 @@ class LWRView extends WatchUi.View {
             } catch (e) {
                 return;
             }
-            if (itr == null) { return; }
-            var s = itr.next();
-            if (s != null) {
-                var hr = null;
-                if (s has :heartRate) { hr = s.heartRate; }
-                if (hr != null && hr > 0) {
-                    mHrStr = hr.toNumber().toString();
-                    mHrSum += hr;
-                    mHrCount += 1;
-                    mAvgHr = (mHrSum / mHrCount).toNumber();
+            // 取最近一个有效样本
+            for (var i = 0; i < 5; i++) {
+                var s = itr.next();
+                if (s == null) { break; }
+                if (s has :heartRate) {
+                    var hr = s.heartRate;
+                    if (hr != null && hr > 0) {
+                        applyHeartRate(hr as Numeric);
+                        break;
+                    }
                 }
             }
         }
+    }
+
+    //! 相邻两个 GPS 点的地面距离（米），haversine 公式
+    private function haversineM(lat1 as Double, lon1 as Double, lat2 as Double, lon2 as Double) as Float {
+        var dLat = Math.toRadians(lat2 - lat1);
+        var dLon = Math.toRadians(lon2 - lon1);
+        var a = Math.sin(dLat / 2.0) * Math.sin(dLat / 2.0)
+              + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+              * Math.sin(dLon / 2.0) * Math.sin(dLon / 2.0);
+        if (a < 0.0) { a = 0.0; }
+        if (a > 1.0) { a = 1.0; }
+        var c = 2.0 * Math.atan2(Math.sqrt(a), Math.sqrt(1.0 - a));
+        return (6371000.0 * c).toFloat();
+    }
+
+    //! ---- 振动提醒（Attention.vibrate）----
+    //! profile = [强度 dutyCycle(0~100 百分比), 持续毫秒]，强度 0 为停顿
+    private function buzz(pattern as Array<Attention.VibeProfile>) as Void {
+        try {
+            if ((Toybox has :Attention) && (Attention has :vibrate)) {
+                Attention.vibrate(pattern);
+            }
+        } catch (e) { }
+    }
+
+    //! GPS 连接：短震 1 次
+    private function buzzGps() as Void {
+        buzz([ new Attention.VibeProfile(100, 150) as Attention.VibeProfile ]);
+    }
+
+    //! 自动开表：长震 1 次
+    private function buzzStart() as Void {
+        buzz([ new Attention.VibeProfile(100, 800) as Attention.VibeProfile ]);
+    }
+
+    //! 每跑满 1 整公里：短震 1 次
+    private function buzzKm() as Void {
+        buzz([ new Attention.VibeProfile(100, 150) as Attention.VibeProfile ]);
+    }
+
+    //! 达到目标距离：长震 3 次
+    private function buzzGoal() as Void {
+        buzz([
+            new Attention.VibeProfile(100, 500) as Attention.VibeProfile,
+            new Attention.VibeProfile(0, 200) as Attention.VibeProfile,
+            new Attention.VibeProfile(100, 500) as Attention.VibeProfile,
+            new Attention.VibeProfile(0, 200) as Attention.VibeProfile,
+            new Attention.VibeProfile(100, 500) as Attention.VibeProfile
+        ]);
     }
 
     //! 每秒一次：更新时间 / 姿态识别 / 运行数据
@@ -335,20 +451,28 @@ class LWRView extends WatchUi.View {
                 startRun();
             }
         } else if (mState == ST_RUN) {
-            pollHeartRate();
+            pollHeartRate();   // 备用通道（传感器回调为主）
 
             // 计时器
             var el = ((System.getTimer() - mRunStartMs) / 1000).toNumber();
             mTimerStr = formatDuration(el);
 
-            // 距离与达标判断
-            mDistStr = Lang.format("%.2f", [ mRunDist / 1000.0 ]);
+            // 距离与达标判断（%.2f 用数值 format 方法，Lang.format 不认这个写法）
+            mDistStr = (mRunDist / 1000.0).format("%.2f");
             var target = mIntKm * 1000.0 + mDecH * 10.0;
             var rem = (target - mRunDist) / 1000.0;
-            mRemainStr = rem > 0.0 ? Lang.format("%.2f", [ rem ]) : "0.00";
+            mRemainStr = rem > 0.0 ? rem.format("%.2f") : "0.00";
             if (mRunDist >= target) {
+                buzzGoal();    // 达标长震3
                 finishRun();
                 return;
+            }
+
+            // 每跑满 1 整公里：短震提醒
+            var kmNow = (mRunDist / 1000.0).toNumber();
+            if (kmNow >= mLastKmMark + 1) {
+                mLastKmMark = kmNow;
+                buzzKm();
             }
 
             // 配速
@@ -435,11 +559,11 @@ class LWRView extends WatchUi.View {
             dc.drawText(cxM, (h * 0.62).toNumber(), Graphics.FONT_TINY,
                 "UP/DOWN 整数公里", Graphics.TEXT_JUSTIFY_CENTER);
             dc.drawText(cxM, (h * 0.70).toNumber(), Graphics.FONT_TINY,
-                "BACK 调小数 0.01", Graphics.TEXT_JUSTIFY_CENTER);
+                "LAP 调小数 0.01", Graphics.TEXT_JUSTIFY_CENTER);
             dc.drawText(cxM, (h * 0.78).toNumber(), Graphics.FONT_TINY,
                 "START 确认", Graphics.TEXT_JUSTIFY_CENTER);
             dc.drawText(cxM, (h * 0.87).toNumber(), Graphics.FONT_TINY,
-                "长按UP 退出", Graphics.TEXT_JUSTIFY_CENTER);
+                "BACK 退出", Graphics.TEXT_JUSTIFY_CENTER);
             return;
         }
 
@@ -459,7 +583,7 @@ class LWRView extends WatchUi.View {
             dc.drawText(cxM, (h * 0.80).toNumber(), Graphics.FONT_TINY,
                 "双条件就绪自动开跑", Graphics.TEXT_JUSTIFY_CENTER);
             dc.drawText(cxM, (h * 0.88).toNumber(), Graphics.FONT_TINY,
-                "长按UP 退出", Graphics.TEXT_JUSTIFY_CENTER);
+                "BACK 返回 · 长按UP 退出", Graphics.TEXT_JUSTIFY_CENTER);
             return;
         }
 
@@ -480,39 +604,35 @@ class LWRView extends WatchUi.View {
             return;
         }
 
-        // ---- ST_RUN：与 L跑步 v1.3.0 相同的三行布局 ----
-        var r1 = numH;                  // 行1：心率 | 当前时间
-        var r2 = tinyH + gap + numH;    // 行2：距离 | 计时器
-        var r3 = tinyH + gap + numH;    // 行3：配速 | 剩余距离
-        var total = r1 + r2 + r3 + gap * 2;
-        var y = ((h - total) / 2).toNumber();
+        // ---- ST_RUN：圆形屏安全区三行布局（列位收拢到圆内，底部行用小号字体防出圈）----
+        var cxL = (w * 0.32).toNumber();
+        var cxR = (w * 0.68).toNumber();
+        var numSH = dc.getFontHeight(Graphics.FONT_NUMBER_MILD);
 
-        var cxL = (w * 0.26).toNumber();
-        var cxR = (w * 0.72).toNumber();
-
-        // 行1：心率（左） | 当前时间（右）
-        var hrCy = (y + numH * 0.5).toNumber();
+        // 行1：心率（左） | 当前时间（右，小号字体保证圆内完整）
+        var y1 = (h * 0.20).toNumber();
+        var hrCy = (y1 + numH * 0.5).toNumber();
         drawHeart(dc, (cxL - numH * 0.62).toNumber(), hrCy, numH * 0.9, Graphics.COLOR_BLACK);
-        drawBold(dc, (cxL + numH * 0.35).toNumber(), y, mHrStr);
-        drawBold(dc, cxR, y, mTimeStr);
-        y += r1 + gap;
+        drawBold(dc, (cxL + numH * 0.35).toNumber(), y1, mHrStr);
+        drawBoldSmall(dc, cxR, (y1 + (numH - numSH) / 2).toNumber(), mTimeStr);
 
-        // 行2：距离（左） | 计时器（右）
+        // 行2：距离 | 计时器（中段，屏幕最宽处，可用中号字体）
+        var y2 = (h * 0.42).toNumber();
         dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(cxL, y, Graphics.FONT_TINY, "距离", Graphics.TEXT_JUSTIFY_CENTER);
-        dc.drawText(cxR, y, Graphics.FONT_TINY, "计时器", Graphics.TEXT_JUSTIFY_CENTER);
-        var v2y = (y + tinyH + gap).toNumber();
+        dc.drawText(cxL, y2, Graphics.FONT_TINY, "距离", Graphics.TEXT_JUSTIFY_CENTER);
+        dc.drawText(cxR, y2, Graphics.FONT_TINY, "计时器", Graphics.TEXT_JUSTIFY_CENTER);
+        var v2y = (y2 + tinyH + gap).toNumber();
         drawBold(dc, cxL, v2y, mDistStr);
         drawBold(dc, cxR, v2y, mTimerStr);
-        y += r2 + gap;
 
-        // 行3：配速（左） | 剩余距离（右）
+        // 行3：配速 | 剩余（屏幕下缘收窄处，用小号字体）
+        var y3 = (h * 0.68).toNumber();
         dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(cxL, y, Graphics.FONT_TINY, "配速", Graphics.TEXT_JUSTIFY_CENTER);
-        dc.drawText(cxR, y, Graphics.FONT_TINY, "剩余", Graphics.TEXT_JUSTIFY_CENTER);
-        var v3y = (y + tinyH + gap).toNumber();
-        drawBold(dc, cxL, v3y, mPaceStr);
-        drawBold(dc, cxR, v3y, mRemainStr);
+        dc.drawText(cxL, y3, Graphics.FONT_TINY, "配速", Graphics.TEXT_JUSTIFY_CENTER);
+        dc.drawText(cxR, y3, Graphics.FONT_TINY, "剩余", Graphics.TEXT_JUSTIFY_CENTER);
+        var v3y = (y3 + tinyH + gap).toNumber();
+        drawBoldSmall(dc, cxL, v3y, mPaceStr);
+        drawBoldSmall(dc, cxR, v3y, mRemainStr);
     }
 
     //! 数值文字加重加粗：横向 3 遍 + 纵向 2 遍叠印
@@ -521,6 +641,16 @@ class LWRView extends WatchUi.View {
         for (var dx = 0; dx < 3; dx++) {
             for (var dy = 0; dy < 2; dy++) {
                 dc.drawText(x + dx, y + dy, Graphics.FONT_NUMBER_MEDIUM, text, Graphics.TEXT_JUSTIFY_CENTER);
+            }
+        }
+    }
+
+    //! 小号数值文字加重加粗（底部行防出圈用）
+    private function drawBoldSmall(dc as Dc, x as Number, y as Number, text as String) as Void {
+        dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
+        for (var dx = 0; dx < 3; dx++) {
+            for (var dy = 0; dy < 2; dy++) {
+                dc.drawText(x + dx, y + dy, Graphics.FONT_NUMBER_MILD, text, Graphics.TEXT_JUSTIFY_CENTER);
             }
         }
     }
@@ -596,12 +726,13 @@ class LWRView extends WatchUi.View {
 }
 
 //! 按键处理
-//! MENU:   左中键/左下键调整数公里(±1)，右下键(BACK)/LAP键调小数(+0.01)，
-//!         右上键确认；长按 BACK 由系统直接退出应用
-//! ARMED:  左键仍可改距离、右下键可改小数，右上键可跳过双条件立即开始（兜底），
-//!         右下键返回菜单
-//! RUN:    右上键手动结束（停止并保存），右下键放弃（停止并丢弃）
-//! DONE:   确认/返回键回菜单
+//! MENU:   UP/DOWN 调整数公里(±1)，LAP 键调小数(+0.01)，右上键确认，
+//!         短按 BACK 或长按 UP(MENU键) 退出应用
+//! ARMED:  左键仍可改距离、LAP 键改小数，右上键可跳过双条件立即开始（兜底），
+//!         短按 BACK 返回菜单，长按 UP 退出应用
+//! RUN:    右上键手动结束（停止并保存），短按 BACK 放弃（停止并丢弃），
+//!         长按 UP 保存并退出应用
+//! DONE:   确认/返回键回菜单，长按 UP 退出应用
 class LWRDelegate extends WatchUi.InputDelegate {
 
     private var _view as LWRView;
@@ -616,23 +747,25 @@ class LWRDelegate extends WatchUi.InputDelegate {
         var st = _view.mState;
 
         if (st == ST_MENU) {
-            if (WatchUi.KEY_MENU == key)  { _view.exitApp(); return true; }   // 长按 UP 退出应用
+            if (WatchUi.KEY_MENU == key)  { _view.exitApp(); return true; }   // 长按 UP 退出
             if (WatchUi.KEY_UP == key)    { _view.intUp(); return true; }
             if (WatchUi.KEY_DOWN == key)  { _view.intDown(); return true; }
             if (WatchUi.KEY_LAP == key)   { _view.decNext(); return true; }
-            if (WatchUi.KEY_ESC == key)   { _view.decNext(); return true; }
+            if (WatchUi.KEY_ESC == key)   { _view.exitApp(); return true; }   // 短按 BACK 退出
             if (WatchUi.KEY_ENTER == key) { _view.armRun(); return true; }
         } else if (st == ST_ARMED) {
-            if (WatchUi.KEY_MENU == key)  { _view.exitApp(); return true; }   // 长按 UP 退出应用
+            if (WatchUi.KEY_MENU == key)  { _view.exitApp(); return true; }   // 长按 UP 退出
             if (WatchUi.KEY_UP == key)    { _view.intUp(); return true; }
             if (WatchUi.KEY_DOWN == key)  { _view.intDown(); return true; }
             if (WatchUi.KEY_LAP == key)   { _view.decNext(); return true; }
             if (WatchUi.KEY_ENTER == key) { _view.startRun(); return true; }   // 兜底：立即开始
             if (WatchUi.KEY_ESC == key)   { _view.backToMenu(); return true; }
         } else if (st == ST_RUN) {
+            if (WatchUi.KEY_MENU == key)  { _view.exitRunSave(); return true; }  // 长按 UP：保存并退出
             if (WatchUi.KEY_ENTER == key) { _view.finishRun(); return true; }  // 手动结束（保存）
             if (WatchUi.KEY_ESC == key)   { _view.cancelRun(); return true; }  // 放弃（丢弃）
         } else if (st == ST_DONE) {
+            if (WatchUi.KEY_MENU == key)  { _view.exitApp(); return true; }   // 长按 UP 退出
             if (WatchUi.KEY_ENTER == key || WatchUi.KEY_ESC == key) { _view.backToMenu(); return true; }
         }
         return false;
