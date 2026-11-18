@@ -72,11 +72,11 @@ class LRunTimeView extends WatchUi.DataField {
                 mAvgHr = avgHr.toNumber();
             }
 
-            // 距离（米 → 公里，两位小数）
+            // 距离（米 → 公里，两位小数；%.2f 须用数值 format 方法，Lang.format 不认）
             if (info has :distance) {
                 var dist = info.distance;
                 if (dist != null) {
-                    mDistStr = Lang.format("%.2f", [ dist / 1000.0 ]);
+                    mDistStr = ((dist as Float) / 1000.0).format("%.2f");
                 }
             }
 
@@ -100,7 +100,7 @@ class LRunTimeView extends WatchUi.DataField {
             // 配速（速度 m/s → 每公里分'秒）
             var spd = null;
             if (info has :speed) {
-                spd = info.speed;
+                spd = info.speed as Float;
             }
             if (spd != null && spd > 0.1) {
                 var spk = (1000.0 / spd).toNumber();
