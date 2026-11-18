@@ -191,6 +191,7 @@ class LWRView extends WatchUi.View {
         mDetectSec = 0;
         mGpsFix = false;
         mAccelBuf = [];
+        mErrStr = "";
         try {
             // 心跳间期必须显式启用，否则回调里 heartRateData 始终为 null
             Sensor.registerSensorDataListener(method(:onAccel),
@@ -252,9 +253,9 @@ class LWRView extends WatchUi.View {
         WatchUi.requestUpdate();
     }
 
-    //! 跑步中退出应用：先保存已跑部分再退出
+    //! 跑步中退出应用：统一走 cleanup()（内含传感器注销、GPS 关闭、
+    //! 会话停止+保存），保存路径唯一，不会出现重复保存
     public function exitRunSave() as Void {
-        finishRun();
         exitApp();
     }
 
