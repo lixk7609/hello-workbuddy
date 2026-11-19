@@ -5,7 +5,7 @@
         id="E5A7C9B21D34F608A93B4C7D81E2F5A6"
         type="datafield"
         name="@Strings.AppName"
-        version="1.3.1"
+        version="1.3.2"
         minSdkVersion="3.0.0"
         launcherIcon="@Drawables.LauncherIcon">
         <iq:products>
