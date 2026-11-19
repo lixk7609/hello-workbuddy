@@ -1,6 +1,7 @@
 import Toybox.Attention;
 import Toybox.Application;
 import Toybox.Activity;
+import Toybox.ActivityMonitor;
 import Toybox.ActivityRecording;
 import Toybox.Graphics;
 import Toybox.Lang;
@@ -12,7 +13,7 @@ import Toybox.System;
 import Toybox.Timer;
 import Toybox.WatchUi;
 
-//! L冬跑 —— 预设距离自动起停跑步 App v2.0.1
+//! L冬跑 —— 预设距离自动起停跑步 App v2.0.3
 //! 为冬季厚手套场景设计：全程无需摘手套按键。
 //! 流程：左中键/左下键调整数公里(1~42)，右下键(BACK)调小数部分(+0.01)
 //!       → 右上键(START)确认
@@ -488,10 +489,28 @@ class LWRView extends WatchUi.View {
                 startRun();
             }
         } else if (mState == ST_RUN) {
-            // 备用通道：仅当传感器回调超过 3 秒没送来心率时才轮询历史，
-            // 避免同一份历史样本被两条通道重复计入平均值
+            // 心率兜底：传感器回调超过 3 秒没送来心率时，
+            // 先读 ActivityMonitor 实时心率（真机最可靠），再退到 SensorHistory 历史
             if (System.getTimer() - mLastHrCbMs > 3000) {
-                pollHeartRate();
+                var hrAM = null;
+                try {
+                    if ((Toybox has :ActivityMonitor) && (ActivityMonitor has :getHeartRateHistory)) {
+                        var itr2 = ActivityMonitor.getHeartRateHistory(1, true);   // 最近 1 个样本，最新在前
+                        if (itr2 != null) {
+                            var s2 = itr2.next();
+                            if (s2 != null && s2.heartRate != null
+                                && s2.heartRate != ActivityMonitor.INVALID_HR_SAMPLE
+                                && s2.heartRate > 0) {
+                                hrAM = s2.heartRate;
+                            }
+                        }
+                    }
+                } catch (e) { hrAM = null; }
+                if (hrAM != null) {
+                    applyHeartRate(hrAM);
+                } else {
+                    pollHeartRate();
+                }
             }
 
             // 计时器
@@ -646,29 +665,27 @@ class LWRView extends WatchUi.View {
             return;
         }
 
-        // ---- ST_RUN：圆形屏安全区三行布局（列位收拢到圆内，底部行用小号字体防出圈）----
+        // ---- ST_RUN：圆形屏安全区三行布局 ----
         var cxL = (w * 0.32).toNumber();
         var cxR = (w * 0.68).toNumber();
         var numSH = dc.getFontHeight(Graphics.FONT_NUMBER_MILD);
 
-        // 行1：心率（左） | 当前时间（右，小号字体保证圆内完整）
-        var y1 = (h * 0.20).toNumber();
-        var hrCy = (y1 + numH * 0.5).toNumber();
-        drawHeart(dc, (cxL - numH * 0.62).toNumber(), hrCy, numH * 0.9, Graphics.COLOR_BLACK);
-        drawBold(dc, (cxL + numH * 0.35).toNumber(), y1, mHrStr);
+        // 行1：心率（左，直接显示数值，无图标）| 当前时间（右，小号字体）
+        var y1 = (h * 0.17).toNumber();
+        drawBold(dc, cxL, y1, mHrStr);
         drawBoldSmall(dc, cxR, (y1 + (numH - numSH) / 2).toNumber(), mTimeStr);
 
-        // 行2：距离 | 计时器（中段，屏幕最宽处，可用中号字体）
-        var y2 = (h * 0.42).toNumber();
+        // 行2：距离 | 计时器（数字改用小号字体，给第三行让出空间）
+        var y2 = (h * 0.38).toNumber();
         dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
         dc.drawText(cxL, y2, Graphics.FONT_TINY, "距离", Graphics.TEXT_JUSTIFY_CENTER);
         dc.drawText(cxR, y2, Graphics.FONT_TINY, "计时器", Graphics.TEXT_JUSTIFY_CENTER);
         var v2y = (y2 + tinyH + gap).toNumber();
-        drawBold(dc, cxL, v2y, mDistStr);
-        drawBold(dc, cxR, v2y, mTimerStr);
+        drawBoldSmall(dc, cxL, v2y, mDistStr);
+        drawBoldSmall(dc, cxR, v2y, mTimerStr);
 
         // 行3：配速 | 剩余（屏幕下缘收窄处，用小号字体）
-        var y3 = (h * 0.68).toNumber();
+        var y3 = (h * 0.62).toNumber();
         dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
         dc.drawText(cxL, y3, Graphics.FONT_TINY, "配速", Graphics.TEXT_JUSTIFY_CENTER);
         dc.drawText(cxR, y3, Graphics.FONT_TINY, "剩余", Graphics.TEXT_JUSTIFY_CENTER);
@@ -757,19 +774,6 @@ class LWRView extends WatchUi.View {
         }
     }
 
-    //! 画一个实心小爱心（两个圆 + 三角）
-    private function drawHeart(dc as Dc, cx as Number, cy as Number, s as Float, color as Number) as Void {
-        dc.setColor(color, Graphics.COLOR_TRANSPARENT);
-        var r = (s * 0.5).toNumber();
-        var top = (cy - s * 0.25).toNumber();
-        dc.fillCircle((cx - r).toNumber(), top, r);
-        dc.fillCircle((cx + r).toNumber(), top, r);
-        dc.fillPolygon([
-            [ (cx - s * 0.62).toNumber(), (cy - s * 0.05).toNumber() ],
-            [ (cx + s * 0.62).toNumber(), (cy - s * 0.05).toNumber() ],
-            [ cx, (cy + s * 0.72).toNumber() ]
-        ]);
-    }
 }
 
 //! 按键处理
