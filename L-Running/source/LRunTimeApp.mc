@@ -141,34 +141,32 @@ class LRunTimeView extends WatchUi.DataField {
 
         // ---- 内容三行 ----
         var numH  = dc.getFontHeight(Graphics.FONT_NUMBER_MEDIUM);
+        var numSH = dc.getFontHeight(Graphics.FONT_NUMBER_MILD);
         var tinyH = dc.getFontHeight(Graphics.FONT_TINY);
         var gap   = 4;
 
         var r1 = numH;                  // 行1：心率 | 当前时间
-        var r2 = tinyH + gap + numH;    // 行2：标签 + 数值
+        var r2 = tinyH + gap + numSH;   // 行2：标签 + 数值（小号字体，给底部行让空间）
         var r3 = tinyH + gap + numH;    // 行3：标签 + 数值
         var total = r1 + r2 + r3 + gap * 2;
         var y = ((h - total) / 2).toNumber();
 
-        var cxL = (w * 0.26).toNumber();
+        var cxL = (w * 0.32).toNumber();
         var cxR = (w * 0.72).toNumber();
 
-        // 行1：心率（左） | 当前时间（右）
-        var hrCy = (y + numH * 0.5).toNumber();
-        drawHeart(dc, (cxL - numH * 0.62).toNumber(), hrCy, numH * 0.9, Graphics.COLOR_BLACK);
-
-        drawBold(dc, (cxL + numH * 0.35).toNumber(), y, mHrStr);
+        // 行1：心率（左，直接显示数值，无图标） | 当前时间（右）
+        drawBold(dc, cxL, y, mHrStr);
         drawBold(dc, cxR, y, mTimeStr);
         y += r1 + gap;
 
-        // 行2：距离（左） | 计时器（右）
+        // 行2：距离（左） | 计时器（右），数字改用小号字体
         dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
         dc.drawText(cxL, y, Graphics.FONT_TINY, "距离", Graphics.TEXT_JUSTIFY_CENTER);
         dc.drawText(cxR, y, Graphics.FONT_TINY, "计时器", Graphics.TEXT_JUSTIFY_CENTER);
 
         var v2y = (y + tinyH + gap).toNumber();
-        drawBold(dc, cxL, v2y, mDistStr);
-        drawBold(dc, cxR, v2y, mTimerStr);
+        drawBoldSmall(dc, cxL, v2y, mDistStr);
+        drawBoldSmall(dc, cxR, v2y, mTimerStr);
         y += r2 + gap;
 
         // 行3：配速（居中）
@@ -184,6 +182,16 @@ class LRunTimeView extends WatchUi.DataField {
         for (var dx = 0; dx < 3; dx++) {
             for (var dy = 0; dy < 2; dy++) {
                 dc.drawText(x + dx, y + dy, Graphics.FONT_NUMBER_MEDIUM, text, Graphics.TEXT_JUSTIFY_CENTER);
+            }
+        }
+    }
+
+    //! 小号数值文字加重加粗（行2防挤占、底部行防出圈用）
+    private function drawBoldSmall(dc as Dc, x as Number, y as Number, text as String) as Void {
+        dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
+        for (var dx = 0; dx < 3; dx++) {
+            for (var dy = 0; dy < 2; dy++) {
+                dc.drawText(x + dx, y + dy, Graphics.FONT_NUMBER_MILD, text, Graphics.TEXT_JUSTIFY_CENTER);
             }
         }
     }
@@ -244,19 +252,5 @@ class LRunTimeView extends WatchUi.DataField {
                 [ i1x, i1y ], [ imx, imy ], [ i0x, i0y ]
             ]);
         }
-    }
-
-    //! 画一个实心小爱心（两个圆 + 三角）
-    private function drawHeart(dc as Dc, cx as Number, cy as Number, s as Float, color as Number) as Void {
-        dc.setColor(color, Graphics.COLOR_TRANSPARENT);
-        var r = (s * 0.5).toNumber();
-        var top = (cy - s * 0.25).toNumber();
-        dc.fillCircle((cx - r).toNumber(), top, r);
-        dc.fillCircle((cx + r).toNumber(), top, r);
-        dc.fillPolygon([
-            [ (cx - s * 0.62).toNumber(), (cy - s * 0.05).toNumber() ],
-            [ (cx + s * 0.62).toNumber(), (cy - s * 0.05).toNumber() ],
-            [ cx, (cy + s * 0.72).toNumber() ]
-        ]);
     }
 }
