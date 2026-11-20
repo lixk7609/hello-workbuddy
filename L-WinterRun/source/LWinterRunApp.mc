@@ -13,7 +13,7 @@ import Toybox.System;
 import Toybox.Timer;
 import Toybox.WatchUi;
 
-//! L冬跑 —— 预设距离自动起停跑步 App v2.0.3
+//! L冬跑 —— 预设距离自动起停跑步 App v2.0.4
 //! 为冬季厚手套场景设计：全程无需摘手套按键。
 //! 流程：左中键/左下键调整数公里(1~42)，右下键(BACK)调小数部分(+0.01)
 //!       → 右上键(START)确认
@@ -528,11 +528,14 @@ class LWRView extends WatchUi.View {
                 return;
             }
 
-            // 每跑满 1 整公里：短震提醒
+            // 每跑满 1 整公里：短震提醒 + 打分段标记（手表记录里按公里分 Lap）
             var kmNow = (mRunDist / 1000.0).toNumber();
             if (kmNow >= mLastKmMark + 1) {
                 mLastKmMark = kmNow;
                 buzzKm();
+                if (mSession != null) {
+                    try { mSession.addLap(); } catch (e) { }
+                }
             }
 
             // 配速
@@ -666,8 +669,12 @@ class LWRView extends WatchUi.View {
         }
 
         // ---- ST_RUN：圆形屏安全区三行布局 ----
+        // 第一行位置保持不变；第二行整体上移约 1.5mm；
+        // 第三行按第二行数值的实际底部动态排布（保证不串行），底部离开圆屏下缘（不溢出）
         var cxL = (w * 0.32).toNumber();
         var cxR = (w * 0.68).toNumber();
+        var cxL2 = (w * 0.34).toNumber();   // 行2/3 列位略向内收，防底部两角出圆
+        var cxR2 = (w * 0.66).toNumber();
         var numSH = dc.getFontHeight(Graphics.FONT_NUMBER_MILD);
 
         // 行1：心率（左，直接显示数值，无图标）| 当前时间（右，小号字体）
@@ -675,23 +682,23 @@ class LWRView extends WatchUi.View {
         drawBold(dc, cxL, y1, mHrStr);
         drawBoldSmall(dc, cxR, (y1 + (numH - numSH) / 2).toNumber(), mTimeStr);
 
-        // 行2：距离 | 计时器（数字改用小号字体，给第三行让出空间）
-        var y2 = (h * 0.38).toNumber();
+        // 行2：距离 | 计时器（上移，位置固定）
+        var y2 = (h * 0.34).toNumber();
         dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(cxL, y2, Graphics.FONT_TINY, "距离", Graphics.TEXT_JUSTIFY_CENTER);
-        dc.drawText(cxR, y2, Graphics.FONT_TINY, "计时器", Graphics.TEXT_JUSTIFY_CENTER);
+        dc.drawText(cxL2, y2, Graphics.FONT_TINY, "距离", Graphics.TEXT_JUSTIFY_CENTER);
+        dc.drawText(cxR2, y2, Graphics.FONT_TINY, "计时器", Graphics.TEXT_JUSTIFY_CENTER);
         var v2y = (y2 + tinyH + gap).toNumber();
-        drawBoldSmall(dc, cxL, v2y, mDistStr);
-        drawBoldSmall(dc, cxR, v2y, mTimerStr);
+        drawBoldSmall(dc, cxL2, v2y, mDistStr);
+        drawBoldSmall(dc, cxR2, v2y, mTimerStr);
 
-        // 行3：配速 | 剩余（屏幕下缘收窄处，用小号字体）
-        var y3 = (h * 0.62).toNumber();
+        // 行3：配速 | 剩余（贴着第二行数值底部 + 8px 间隙动态排布，字号不动）
+        var y3 = (v2y + numSH + 8).toNumber();
         dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(cxL, y3, Graphics.FONT_TINY, "配速", Graphics.TEXT_JUSTIFY_CENTER);
-        dc.drawText(cxR, y3, Graphics.FONT_TINY, "剩余", Graphics.TEXT_JUSTIFY_CENTER);
+        dc.drawText(cxL2, y3, Graphics.FONT_TINY, "配速", Graphics.TEXT_JUSTIFY_CENTER);
+        dc.drawText(cxR2, y3, Graphics.FONT_TINY, "剩余", Graphics.TEXT_JUSTIFY_CENTER);
         var v3y = (y3 + tinyH + gap).toNumber();
-        drawBoldSmall(dc, cxL, v3y, mPaceStr);
-        drawBoldSmall(dc, cxR, v3y, mRemainStr);
+        drawBoldSmall(dc, cxL2, v3y, mPaceStr);
+        drawBoldSmall(dc, cxR2, v3y, mRemainStr);
 
         if (mErrStr != "") {
             dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
