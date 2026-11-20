@@ -5,7 +5,7 @@
         id="A3F8D2C74E19B605D8C3A1F7E4B9D206"
         type="watch-app"
         name="@Strings.AppName"
-        version="2.0.3"
+        version="2.0.4"
         minSdkVersion="3.0.0"
         launcherIcon="@Drawables.LauncherIcon">
         <iq:products>
