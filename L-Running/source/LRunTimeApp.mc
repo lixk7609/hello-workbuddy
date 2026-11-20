@@ -140,15 +140,14 @@ class LRunTimeView extends WatchUi.DataField {
         drawZoneArc(dc, cxM, cyM, h, mAvgHr);
 
         // ---- 内容三行 ----
+        // 行3 位置按行2 数值的实际底部动态排布（+8px 间隙），根治串行；字号全部不动
         var numH  = dc.getFontHeight(Graphics.FONT_NUMBER_MEDIUM);
         var numSH = dc.getFontHeight(Graphics.FONT_NUMBER_MILD);
         var tinyH = dc.getFontHeight(Graphics.FONT_TINY);
         var gap   = 4;
 
         var r1 = numH;                  // 行1：心率 | 当前时间
-        var r2 = tinyH + gap + numSH;   // 行2：标签 + 数值（小号字体，给底部行让空间）
-        var r3 = tinyH + gap + numH;    // 行3：标签 + 数值
-        var total = r1 + r2 + r3 + gap * 2;
+        var total = r1 + gap + (tinyH + gap + numSH) + (8 + tinyH + gap + numSH);
         var y = ((h - total) / 2).toNumber();
 
         var cxL = (w * 0.32).toNumber();
@@ -159,7 +158,7 @@ class LRunTimeView extends WatchUi.DataField {
         drawBold(dc, cxR, y, mTimeStr);
         y += r1 + gap;
 
-        // 行2：距离（左） | 计时器（右），数字改用小号字体
+        // 行2：距离（左） | 计时器（右），小号数字
         dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
         dc.drawText(cxL, y, Graphics.FONT_TINY, "距离", Graphics.TEXT_JUSTIFY_CENTER);
         dc.drawText(cxR, y, Graphics.FONT_TINY, "计时器", Graphics.TEXT_JUSTIFY_CENTER);
@@ -167,13 +166,13 @@ class LRunTimeView extends WatchUi.DataField {
         var v2y = (y + tinyH + gap).toNumber();
         drawBoldSmall(dc, cxL, v2y, mDistStr);
         drawBoldSmall(dc, cxR, v2y, mTimerStr);
-        y += r2 + gap;
 
-        // 行3：配速（居中）
+        // 行3：配速（居中，贴着行2 数值底部 + 8px，动态排布不串行；小号数字防出圈）
+        var y3 = (v2y + numSH + 8).toNumber();
         dc.setColor(Graphics.COLOR_BLACK, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(cxM, y, Graphics.FONT_TINY, "配速", Graphics.TEXT_JUSTIFY_CENTER);
+        dc.drawText(cxM, y3, Graphics.FONT_TINY, "配速", Graphics.TEXT_JUSTIFY_CENTER);
 
-        drawBold(dc, cxM, (y + tinyH + gap).toNumber(), mPaceStr);
+        drawBoldSmall(dc, cxM, (y3 + tinyH + gap).toNumber(), mPaceStr);
     }
 
     //! 数值文字加重加粗：横向 3 遍 + 纵向 2 遍叠印（Garmin 点阵字无粗体，只能靠偏移叠印）
